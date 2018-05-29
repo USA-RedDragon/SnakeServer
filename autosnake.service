@@ -1,0 +1,10 @@
+[Unit]
+Description=autosnake
+
+[Service]
+Type=simple
+User=root
+ExecStart=/bin/bash /home/pi/startup.sh
+
+[Install]
+WantedBy=multi-user.target

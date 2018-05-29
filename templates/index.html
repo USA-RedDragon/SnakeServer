@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <title>Boa Home</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.7.2/Chart.bundle.js"></script>
+        <script src="https://momentjs.com/downloads/moment.min.js"></script>
+    </head>
+    <body style="color: #fff ; background-color: #000">
+        <p>Current Temperature: {{ temperature }} &deg;F</p>
+        <p>Current Humidity: {{ humidity }}%</p>
+        <canvas id="graph" width="100" height="100"></canvas>
+        <script>
+            var ctx = document.getElementById('graph').getContext('2d');
+            var myChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: {{ timearray | safe }},
+                    datasets: [{
+                        label: 'Temperature (\xB0F)',
+                        backgroundColor: 'rgba(255, 0, 0, 0.2)',
+                        borderColor: 'rgba(255, 0, 0, 0.2)',
+                        data: {{ temperaturearray }},
+                        fill: false,
+                    }, {
+                        label: 'Humidity (%)',
+                        fill: false,
+                        backgroundColor: 'rgba(0, 0, 255, 0.2)',
+                        borderColor: 'rgba(0, 0, 255, 0.2)',
+                        data: {{ humidityarray }},
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    title: {
+                        display: true,
+                        text: 'Temperature and Humidity Over Time'
+                    },
+                    tooltips: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    hover: {
+                        mode: 'nearest',
+                        intersect: true
+                    },
+                    scales: {
+                        xAxes: [{
+                            display: true,
+                            type: 'time',
+                            distribution: 'linear',
+                            scaleLabel: {
+                                display: true,
+                                labelString: 'Time'
+                            },
+                            time: {
+                                unit: 'second',
+                                displayFormats: {
+                                    second: 'h:mm:ss a'
+                                },
+                                parser: function (utcMoment) {
+                                    return moment.unix(utcMoment).utcOffset(new Date().getTimezoneOffset());
+                                }
+                            },
+                            ticks: {
+                                autoSkip: true,
+                                source: 'auto'
+                            }
+                        }],
+                        yAxes: [{
+                            display: true,
+                            scaleLabel: {
+                                display: true,
+                                labelString: 'Value'
+                            },
+                            ticks: {
+                                min: 0,
+                                max: 100
+                            }
+                        }]
+                    }
+                }
+            });
+        </script>
+    </body>
+</html>
