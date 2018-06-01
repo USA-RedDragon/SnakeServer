@@ -334,15 +334,15 @@ if __name__ == "__main__":
     else:
         readConfig()
 
-    db = sqlite3.connect("data.db", check_same_thread = False)
+    db = sqlite3.connect('{}/data.db'.format(os.path.dirname(os.path.realpath(__file__))), check_same_thread = False)
     conn = db.cursor()
+    conn.execute("CREATE TABLE IF NOT EXISTS data (timestamp int, temperature int, humidity int);")
 
     alertRunning = False
     gpio.set_mode(15, pigpio.OUTPUT)
     gpio.set_mode(10, pigpio.OUTPUT)
     gpio.set_mode(11, pigpio.OUTPUT)
     lastHumidity, lastTemperature = getDhtData()
-    conn.execute("CREATE TABLE IF NOT EXISTS data (timestamp int, temperature int, humidity int);")
     atexit.register(exit_handler)
     thread.start_new_thread(flaskThread,())
     time.sleep(2)

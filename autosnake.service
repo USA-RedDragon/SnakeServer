@@ -4,7 +4,7 @@ Description=autosnake
 [Service]
 Type=simple
 User=root
-ExecStart=/bin/bash /home/pi/startup.sh
+ExecStart=/usr/bin/python /home/pi/snake/main.py
 Restart=always
 RestartSec=3
 
