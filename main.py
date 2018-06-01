@@ -1,13 +1,18 @@
 #!/usr/bin/python
 
-finishedInit = False
+import faulthandler
+faulthandler.enable()
 
 from lcd1602 import LCD
 import thread
 import time
 
-lcd = LCD()
 def initThread():
+    global finishedInit
+    global lcd
+
+    finishedInit = False
+    lcd = LCD()
     lcd.clear()
     lcd.message("Initializing Boa\nHome")
     lcd.begin(0, 2)
@@ -30,41 +35,26 @@ def initThread():
 
 thread.start_new_thread(initThread,())
 
-import atexit
-from datetime import datetime, timedelta
-import DHT22
 from flask import Flask
-from flask import render_template
-from flask import request
-from flask import jsonify
-import json
-import numpy as np
-import os.path
-import pigpio
-from pyfcm import FCMNotification
-import sqlite3
+from json import dumps
 import threading
 
 app = Flask(__name__)
-gpio = pigpio.pi()
-if not gpio.connected:
-    exit()
-sensor = DHT22.sensor(gpio, 15)
-db = sqlite3.connect("data.db", check_same_thread = False)
-conn = db.cursor()
-push_service = FCMNotification(api_key="DUMMY")
-lastTemperature = 0
-lastHumidity = 0
-lock = threading.Lock()
+
+sensorLock = threading.Lock()
 screenLock = threading.Lock()
+databaseLock = threading.Lock()
+
 alertHumidityThreshold = 60
 turnOnHumidityThreshold = 70
 alertTemperatureThreshold = 85
 alertTemperatureAboveThreshold = 96
 turnOnTemperatureThreshold = 89
 turnOffTemperatureThreshold = 92
+
 lastHumidityTime = 0
 lastTemperatureTime = 0
+lastPumpTime = 0
 
 ## Gracefully stop gpio
 def exit_handler():
@@ -77,7 +67,8 @@ def exit_handler():
 def getDhtData():
     global lastTemperature
     global lastHumidity
-    with lock:
+
+    with sensorLock:
         sensor.trigger()
         time.sleep(0.2)
         if sensor.humidity() < 0 or sensor.temperature() < 0:
@@ -89,10 +80,13 @@ def getDhtData():
     return lastHumidity, lastTemperature
 
 def runPump(seconds):
-    print("Turning on pump for {} seconds".format(seconds))
-    gpio.write(10, 1)
-    time.sleep(seconds)
-    gpio.write(10, 0)
+    global lastPumpTime
+    if lastPumpTime + 12000000 < int(round(time.time() * 1000)):
+        lastPumpTime = int(round(time.time() * 1000))
+        print("Turning on pump for {} seconds".format(seconds))
+        gpio.write(10, 1)
+        time.sleep(seconds)
+        gpio.write(10, 0)
 
 def turnOnHeat():
     print("Turning on heat")
@@ -104,35 +98,46 @@ def turnOffHeat():
 
 ## DB Utils
 def addDataToDB(temperature, humidity):
-    conn.execute("INSERT INTO data (timestamp, temperature, humidity) VALUES (?, ?, ?)", (int(time.mktime(datetime.now().timetuple())), temperature, humidity))
-    db.commit()
+    from datetime import datetime
+    with databaseLock:
+        conn.execute("INSERT INTO data (timestamp, temperature, humidity) VALUES (?, ?, ?)", (int(time.mktime(datetime.now().timetuple())), temperature, humidity))
+        db.commit()
 
 def getDataFromDB(since, useJson=True):
-    conn.execute("SELECT * FROM data WHERE timestamp > ?", (since,))
-    dbData = np.array(conn.fetchall())
+    with databaseLock:
+        conn.execute("SELECT * FROM data WHERE timestamp > ?", (since,))
+        dbData = conn.fetchall()
+        if useJson:
+            if len(dbData) == 0:
+                return dumps([]), dumps([]), dumps([])
+            temperaturearray=dumps([i[2] for i in dbData])
+            humidityarray=dumps([i[1] for i in dbData])
+            timearray=dumps([i[0] for i in dbData])
+            return temperaturearray, humidityarray, timearray
+        else:
+            if len(dbData) == 0:
+                return [], [], []
+            temperaturearray=[i[2] for i in dbData]
+            humidityarray=[i[1] for i in dbData]
+            timearray=[i[0] for i in dbData]
+            return temperaturearray, humidityarray, timearray
+
     if useJson:
-        if dbData.size == 0:
-            return json.dumps([]), json.dumps([]), json.dumps([])
-        temperaturearray=json.dumps(dbData[:,2].tolist())
-        humidityarray=json.dumps(dbData[:,1].tolist())
-        timearray=json.dumps(dbData[:,0].tolist())
-        return temperaturearray, humidityarray, timearray
+        return dumps([]), dumps([]), dumps([])
     else:
-        if dbData.size == 0:
-            return [], [], []
-        temperaturearray=dbData[:,2].tolist()
-        humidityarray=dbData[:,1].tolist()
-        timearray=dbData[:,0].tolist()
-        return temperaturearray, humidityarray, timearray
+        return [], [], []
 
 ## API Calls
 @app.route("/")
 def ui():
-    lastHumidity, lastTemperature = getDhtData()
+    from datetime import datetime, timedelta
+    from flask import render_template
+
+    humidity, temperature = getDhtData()
     dt = datetime.now()
     twelveHrsAgo = dt - timedelta(hours=12)
     temperaturearray, humidityarray, timearray = getDataFromDB(int(time.mktime(twelveHrsAgo.timetuple())))
-    return render_template('index.html', temperature=lastTemperature, humidity=lastHumidity, temperaturearray=temperaturearray, humidityarray=humidityarray, timearray=timearray)
+    return render_template('index.html', temperature=temperature, humidity=humidity, temperaturearray=temperaturearray, humidityarray=humidityarray, timearray=timearray)
 
 @app.route("/api/v1/temperature")
 def temperature():
@@ -146,10 +151,13 @@ def humidity():
 
 @app.route("/api/v1/settings/temperaturethreshold", methods=['GET', 'POST'])
 def tempthreshold():
+    from flask import jsonify, request
+
     global alertTemperatureThreshold
     global alertTemperatureAboveThreshold
     global turnOnTemperatureThreshold
     global turnOffTemperatureThreshold
+
     if request.method == 'POST':
         if request.values.get('alertTemperatureThreshold') is not None:
             alertTemperatureThreshold = int(request.values.get('alertTemperatureThreshold'))
@@ -166,8 +174,11 @@ def tempthreshold():
 
 @app.route("/api/v1/settings/humiditythreshold", methods=['GET', 'POST'])
 def humiditythreshold():
+    from flask import jsonify, request
+
     global alertHumidityThreshold
     global turnOnHumidityThreshold
+
     if request.method == 'POST':
         if request.values.get('alertHumidityThreshold') is not None:
             alertHumidityThreshold = int(request.values.get('alertHumidityThreshold'))
@@ -180,6 +191,8 @@ def humiditythreshold():
 
 @app.route('/api/v1/database/<since>')
 def sendDatabase(since):
+    from flask import jsonify
+
     temperaturearray, humidityarray, timearray = getDataFromDB(int(since), False)
     return jsonify(temperature=temperaturearray, humidity=humidityarray, time=timearray)
 
@@ -198,15 +211,16 @@ def alertThread():
         with screenLock:
             lcd.setCursor(14, 1)
             lcd.message("!!")
-        time.sleep(1)
+        time.sleep(3)
         with screenLock:
             lcd.setCursor(14, 1)
             lcd.message("  ")
-        time.sleep(1)
+        time.sleep(3)
     alertRunning = False
 
 ## Use main to init and this as a work loop
 def loop():
+    time.sleep(5)
     # Reset sequence on the DHT22 pins
     gpio.write(15, 0)
     gpio.write(15, 1)
@@ -238,17 +252,24 @@ def loop():
             sendAlert("Humidity too low at {}".format(lastHumidity), "humidity")
         runPump(6)
     elif lastHumidity <= turnOnHumidityThreshold:
-        runPump(6)
+        runPump(3)
+    time.sleep(5)
 
 def flaskThread():
+    global finishedInit
+    app.run(port=80, host='0.0.0.0')
+    finishedInit = True
     with screenLock:
         lcd.clear()
         lcd.message("Server Loaded")
-    app.run(port=80, host='0.0.0.0')
 
 def sendAlert(message, type):
+    from pyfcm import FCMNotification
+
     global lastHumidityTime
     global lastTemperatureTime
+
+    push_service = FCMNotification(api_key="DUMMY")
     if type is "humidity" and lastHumidityTime + 300000 < int(round(time.time() * 1000)):
         print("Sending humidity Alert")
         lastHumidityTime = int(round(time.time() * 1000))
@@ -259,18 +280,25 @@ def sendAlert(message, type):
         push_service.notify_topic_subscribers(topic_name="alerts", message_body=message)
 
 def saveConfig():
+    from json import dump
+    import os.path
+
     with open('{}/config.json'.format(os.path.dirname(os.path.realpath(__file__))), 'w') as f:
-        json.dump({'alertHumidityThreshold': alertHumidityThreshold, 'turnOnHumidityThreshold': turnOnHumidityThreshold, 'alertTemperatureThreshold': alertTemperatureThreshold, 'alertTemperatureAboveThreshold': alertTemperatureAboveThreshold, 'turnOnTemperatureThreshold': turnOnTemperatureThreshold, 'turnOffTemperatureThreshold': turnOffTemperatureThreshold}, f);
+        dump({'alertHumidityThreshold': alertHumidityThreshold, 'turnOnHumidityThreshold': turnOnHumidityThreshold, 'alertTemperatureThreshold': alertTemperatureThreshold, 'alertTemperatureAboveThreshold': alertTemperatureAboveThreshold, 'turnOnTemperatureThreshold': turnOnTemperatureThreshold, 'turnOffTemperatureThreshold': turnOffTemperatureThreshold}, f);
 
 def readConfig():
+    from json import load
+    import os.path
+
     global alertHumidityThreshold
     global turnOnHumidityThreshold
     global alertTemperatureThreshold
     global alertTemperatureAboveThreshold
     global turnOnTemperatureThreshold
     global turnOffTemperatureThreshold
+
     with open('{}/config.json'.format(os.path.dirname(os.path.realpath(__file__))), 'r') as f:
-        jsonConfig = json.load(f)
+        jsonConfig = load(f)
         alertHumidityThreshold = jsonConfig["alertHumidityThreshold"]
         turnOnHumidityThreshold = jsonConfig["turnOnHumidityThreshold"]
         alertTemperatureThreshold = jsonConfig["alertTemperatureThreshold"]
@@ -280,19 +308,43 @@ def readConfig():
 
 ## Main
 if __name__ == "__main__":
+    import atexit
+    import DHT22
+    import os.path
+    import pigpio
+    import sqlite3
+
     global alertRunning
+    global db
+    global conn
+    global gpio
+    global sensor
+    global lastHumidity
+    global lastTemperature
+
+    lastHumidity = 0
+    lastTemperature = 0
+
+    gpio = pigpio.pi()
+    if not gpio.connected:
+        exit()
+    sensor = DHT22.sensor(gpio, 15)
     if not os.path.exists('{}/config.json'.format(os.path.dirname(os.path.realpath(__file__)))):
         saveConfig()
     else:
         readConfig()
+
+    db = sqlite3.connect("data.db", check_same_thread = False)
+    conn = db.cursor()
+
     alertRunning = False
     gpio.set_mode(15, pigpio.OUTPUT)
     gpio.set_mode(10, pigpio.OUTPUT)
     gpio.set_mode(11, pigpio.OUTPUT)
+    lastHumidity, lastTemperature = getDhtData()
     conn.execute("CREATE TABLE IF NOT EXISTS data (timestamp int, temperature int, humidity int);")
     atexit.register(exit_handler)
     thread.start_new_thread(flaskThread,())
-    finishedInit = True
     time.sleep(2)
     while True:
         loop()
