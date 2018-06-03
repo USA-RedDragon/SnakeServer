@@ -19,7 +19,7 @@ def initThread():
     lcd.setCursor(4, 1)
     currentCharacter = ".   "
     lcd.message(currentCharacter)
-    time.sleep(0.5)
+    time.sleep(0.3)
     while not finishedInit:
         if currentCharacter is ".   ":
             currentCharacter = "..  "
@@ -31,7 +31,7 @@ def initThread():
             currentCharacter = ".   "
         lcd.setCursor(4, 1)
         lcd.message(currentCharacter)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
 thread.start_new_thread(initThread,())
 
@@ -41,16 +41,19 @@ import threading
 
 app = Flask(__name__)
 
-sensorLock = threading.Lock()
 screenLock = threading.Lock()
 databaseLock = threading.Lock()
 
-alertHumidityThreshold = 60
-turnOnHumidityThreshold = 70
-alertTemperatureThreshold = 85
-alertTemperatureAboveThreshold = 96
-turnOnTemperatureThreshold = 89
-turnOffTemperatureThreshold = 92
+config = {
+    'alertHumidityThreshold': 60,
+    'turnOnHumidityThreshold': 70,
+    'alertTemperatureThreshold': 85,
+    'alertTemperatureAboveThreshold': 96,
+    'turnOnTemperatureThreshold': 89,
+    'turnOffTemperatureThreshold': 92,
+    'canAnonViewWebUI': True,
+    'canAnonUsePublicAPI': False
+}
 
 lastHumidityTime = 0
 lastTemperatureTime = 0
@@ -68,15 +71,11 @@ def getDhtData():
     global lastTemperature
     global lastHumidity
 
-    with sensorLock:
-        sensor.trigger()
-        time.sleep(0.2)
-        if sensor.humidity() < 0 or sensor.temperature() < 0:
-            return lastHumidity, lastTemperature
-        lastHumidity = int(sensor.humidity())
-        lastTemperature = int(sensor.temperature()*9.0/5.0+32.0)
-        addDataToDB(lastHumidity, lastTemperature)
-        return lastHumidity, lastTemperature
+    sensor.trigger()
+    time.sleep(0.2)
+    lastHumidity = int(sensor.humidity())
+    lastTemperature = int(sensor.temperature()*9.0/5.0+32.0)
+    addDataToDB(lastHumidity, lastTemperature)
     return lastHumidity, lastTemperature
 
 def runPump(seconds):
@@ -103,6 +102,11 @@ def addDataToDB(temperature, humidity):
         conn.execute("INSERT INTO data (timestamp, temperature, humidity) VALUES (?, ?, ?)", (int(time.mktime(datetime.now().timetuple())), temperature, humidity))
         db.commit()
 
+def addUserToDB(username, password, admin=False):
+    with databaseLock:
+        conn.execute("INSERT INTO users (username, password, admin) VALUES (?, ?, ?)", (username, sha256(password), int(admin)))
+        db.commit()
+
 def getDataFromDB(since, useJson=True):
     with databaseLock:
         conn.execute("SELECT * FROM data WHERE timestamp > ?", (since,))
@@ -127,74 +131,151 @@ def getDataFromDB(since, useJson=True):
     else:
         return [], [], []
 
+def getUserFromDB(username):
+    with databaseLock:
+        conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+        dbData = conn.fetchall()
+        if len(dbData) == 0:
+            return 'anonymous', '', False
+        return dbData[0][0], dbData[0][1], dbData[0][2]
+    return 'anonymous', '', False
+
+def authUser(request):
+    username = (request.authorization and request.authorization.username) or (request.headers.get('Username'))
+    password = (request.authorization and sha256(request.authorization.password)) or (request.headers.get('Password'))
+    expectedUsername, expectedPassword, isAdmin = getUserFromDB(username)
+    if expectedPassword == password:
+        return True;
+    return False
+
+def authHttpUserAsAdmin(auth):
+    username = auth.username
+    password = sha256(auth.password)
+    expectedUsername, expectedPassword, isAdmin = getUserFromDB(username)
+    if expectedPassword == password:
+        return True and isAdmin;
+    return False
+
+def authUserAsAdmin(headers):
+    username = headers.get('Username')
+    password = headers.get('Password')
+    expectedUsername, expectedPassword, isAdmin = getUserFromDB(username)
+    if expectedPassword == password:
+        return True and isAdmin;
+    return False
+
+def httpAuth():
+    from flask import Response
+    return Response(
+        'Could not verify your access level for that URL.\n'
+        'You have to login with proper credentials', 401,
+        {'WWW-Authenticate': 'Basic realm="Login Required"'})
+
 ## API Calls
 @app.route("/")
 def ui():
     from datetime import datetime, timedelta
     from flask import render_template
+    from flask import abort
+    from flask import request
 
-    humidity, temperature = getDhtData()
-    dt = datetime.now()
-    twelveHrsAgo = dt - timedelta(hours=12)
-    temperaturearray, humidityarray, timearray = getDataFromDB(int(time.mktime(twelveHrsAgo.timetuple())))
-    return render_template('index.html', temperature=temperature, humidity=humidity, temperaturearray=temperaturearray, humidityarray=humidityarray, timearray=timearray)
+    if config['canAnonViewWebUI'] or authUser(request):
+        dt = datetime.now()
+        twelveHrsAgo = dt - timedelta(hours=12)
+        temperaturearray, humidityarray, timearray = getDataFromDB(int(time.mktime(twelveHrsAgo.timetuple())))
+        return render_template('index.html', temperature=lastTemperature, humidity=lastHumidity, temperaturearray=temperaturearray, humidityarray=humidityarray, timearray=timearray)
+    else:
+        return httpAuth()
 
 @app.route("/api/v1/temperature")
 def temperature():
-    throwaway, temperature = getDhtData()
-    return str(temperature)
+    from flask import request
+    if config['canAnonUsePublicAPI'] or authUser(request):
+        return str(lastTemperature)
+    else:
+        return httpAuth()
 
 @app.route("/api/v1/humidity")
 def humidity():
-    humidity, throwaway = getDhtData()
-    return str(humidity)
+    from flask import request
+    if config['canAnonUsePublicAPI'] or authUser(request):
+        return str(lastHumidity)
+    else:
+        return httpAuth()
 
 @app.route("/api/v1/settings/temperaturethreshold", methods=['GET', 'POST'])
 def tempthreshold():
     from flask import jsonify, request
 
-    global alertTemperatureThreshold
-    global alertTemperatureAboveThreshold
-    global turnOnTemperatureThreshold
-    global turnOffTemperatureThreshold
-
     if request.method == 'POST':
-        if request.values.get('alertTemperatureThreshold') is not None:
-            alertTemperatureThreshold = int(request.values.get('alertTemperatureThreshold'))
-        if request.values.get('alertTemperatureAboveThreshold') is not None:
-            alertTemperatureAboveThreshold = int(request.values.get('alertTemperatureAboveThreshold'))
-        if request.values.get('turnOnTemperatureThreshold') is not None:
-            turnOnTemperatureThreshold = int(request.values.get('turnOnTemperatureThreshold'))
-        if request.values.get('turnOffTemperatureThreshold') is not None:
-            turnOffTemperatureThreshold = int(request.values.get('turnOffTemperatureThreshold'))
-        saveConfig()
-        return "Success"
+        if authUserAsAdmin(request.headers):
+            if request.values.get('alertTemperatureThreshold') is not None:
+                config['alertTemperatureThreshold'] = int(request.values.get('alertTemperatureThreshold'))
+            if request.values.get('alertTemperatureAboveThreshold') is not None:
+                config['alertTemperatureAboveThreshold'] = int(request.values.get('alertTemperatureAboveThreshold'))
+            if request.values.get('turnOnTemperatureThreshold') is not None:
+                config['turnOnTemperatureThreshold'] = int(request.values.get('turnOnTemperatureThreshold'))
+            if request.values.get('turnOffTemperatureThreshold') is not None:
+                config['turnOffTemperatureThreshold'] = int(request.values.get('turnOffTemperatureThreshold'))
+            saveConfig()
+            return "Success"
+        else:
+            return "Authentication Failed"
     else:
-        return jsonify(alertTemperatureThreshold=alertTemperatureThreshold, alertTemperatureAboveThreshold=alertTemperatureAboveThreshold, turnOnTemperatureThreshold=turnOnTemperatureThreshold, turnOffTemperatureThreshold=turnOffTemperatureThreshold)
+        if config['canAnonUsePublicAPI'] or authUser(request):
+            return jsonify(alertTemperatureThreshold=config['alertTemperatureThreshold'], alertTemperatureAboveThreshold=config['alertTemperatureAboveThreshold'], turnOnTemperatureThreshold=config['turnOnTemperatureThreshold'], turnOffTemperatureThreshold=config['turnOffTemperatureThreshold'])
+        else:
+            return httpAuth()
 
 @app.route("/api/v1/settings/humiditythreshold", methods=['GET', 'POST'])
 def humiditythreshold():
     from flask import jsonify, request
 
-    global alertHumidityThreshold
-    global turnOnHumidityThreshold
-
     if request.method == 'POST':
-        if request.values.get('alertHumidityThreshold') is not None:
-            alertHumidityThreshold = int(request.values.get('alertHumidityThreshold'))
-        if request.values.get('turnOnHumidityThreshold') is not None:
-            turnOnHumidityThreshold = int(request.values.get('turnOnHumidityThreshold'))
-        saveConfig()
-        return "Success"
+        if authUserAsAdmin(request.headers):
+            if request.values.get('alertHumidityThreshold') is not None:
+                config['alertHumidityThreshold'] = int(request.values.get('alertHumidityThreshold'))
+            if request.values.get('turnOnHumidityThreshold') is not None:
+                config['turnOnHumidityThreshold'] = int(request.values.get('turnOnHumidityThreshold'))
+            saveConfig()
+            return "Success"
+        else:
+            return "Authentication failed, or user is not an administrator"
     else:
-        return jsonify(alertHumidityThreshold=alertHumidityThreshold, turnOnHumidityThreshold=turnOnHumidityThreshold)
+        if config['canAnonUsePublicAPI'] or authUser(request):
+            return jsonify(alertHumidityThreshold=config['alertHumidityThreshold'], turnOnHumidityThreshold=config['turnOnHumidityThreshold'])
+        else:
+            return httpAuth()
 
 @app.route('/api/v1/database/<since>')
 def sendDatabase(since):
-    from flask import jsonify
+    from flask import request
 
-    temperaturearray, humidityarray, timearray = getDataFromDB(int(since), False)
-    return jsonify(temperature=temperaturearray, humidity=humidityarray, time=timearray)
+    if config['canAnonUsePublicAPI'] or authUser(request):
+        from flask import jsonify
+
+        temperaturearray, humidityarray, timearray = getDataFromDB(int(since), False)
+        return jsonify(temperature=temperaturearray, humidity=humidityarray, time=timearray)
+    else:
+        return httpAuth()
+
+@app.route('/api/v1/adduser/<username>/<password>')
+def addUsr(username, password, admin=False):
+    from flask import request
+
+    if request.headers.get("Headless") and authUserAsAdmin(request.headers) or (request.authorization and authHttpUserAsAdmin(request.authorization)):
+        usr, psw, ta = getUserFromDB(username)
+        if username == usr:
+            return "Username already exists"
+        else:
+            addUserToDB(username, password, admin)
+            return "Success"
+    else:
+        return httpAuth()
+
+@app.route('/api/v1/adduser/<username>/<password>/<admin>')
+def addUsrAsAdmin(username, password, admin):
+    return addUsr(username, password, admin == 'admin')
 
 def updateScreen(humidity, temperature, alert):
     with screenLock:
@@ -207,7 +288,7 @@ def alertThread():
         return None
     else:
         alertRunning = True
-    while lastTemperature >= alertTemperatureAboveThreshold or lastTemperature <= alertTemperatureThreshold or lastHumidity <= alertHumidityThreshold:
+    while lastTemperature >= config['alertTemperatureAboveThreshold'] or lastTemperature <= config['alertTemperatureThreshold'] or lastHumidity <= config['alertHumidityThreshold']:
         with screenLock:
             lcd.setCursor(14, 1)
             lcd.message("!!")
@@ -220,48 +301,40 @@ def alertThread():
 
 ## Use main to init and this as a work loop
 def loop():
-    time.sleep(5)
-    # Reset sequence on the DHT22 pins
-    gpio.write(15, 0)
-    gpio.write(15, 1)
-    gpio.write(15, 0)
-    gpio.write(15, 0)
-    gpio.write(15, 0)
+    time.sleep(2)
     lastHumidity, lastTemperature = getDhtData()
 
-    alert = lastTemperature >= alertTemperatureAboveThreshold or lastTemperature <= alertTemperatureThreshold or lastHumidity <= alertHumidityThreshold
+    alert = lastTemperature >= config['alertTemperatureAboveThreshold'] or lastTemperature <= config['alertTemperatureThreshold'] or lastHumidity <= config['alertHumidityThreshold']
     updateScreen(lastHumidity, lastTemperature, alert)
     if alert:
         thread.start_new_thread(alertThread,())
 
-    if lastTemperature >= alertTemperatureAboveThreshold:
+    if lastTemperature >= config['alertTemperatureAboveThreshold']:
         if lastTemperature is not 0:
             sendAlert("Temperature is too high at {}".format(lastTemperature), "temperature")
         turnOffHeat()
-    elif lastTemperature <= alertTemperatureThreshold:
+    elif lastTemperature <= config['alertTemperatureThreshold']:
         if lastTemperature is not 0:
             sendAlert("Temperature is too low at {}".format(lastTemperature), "temperature")
         turnOnHeat()
-    elif lastTemperature <= turnOnTemperatureThreshold:
+    elif lastTemperature <= config['turnOnTemperatureThreshold']:
         turnOnHeat()
-    elif lastTemperature >= turnOffTemperatureThreshold:
+    elif lastTemperature >= config['turnOffTemperatureThreshold']:
         turnOffHeat()
 
-    if lastHumidity <= alertHumidityThreshold:
+    if lastHumidity <= config['alertHumidityThreshold']:
         if lastHumidity is not 0:
             sendAlert("Humidity too low at {}".format(lastHumidity), "humidity")
         runPump(6)
-    elif lastHumidity <= turnOnHumidityThreshold:
+    elif lastHumidity <= config['turnOnHumidityThreshold']:
         runPump(3)
     time.sleep(5)
 
 def flaskThread():
-    global finishedInit
-    app.run(port=80, host='0.0.0.0')
-    finishedInit = True
     with screenLock:
         lcd.clear()
         lcd.message("Server Loaded")
+    app.run(port=80, host='0.0.0.0')
 
 def sendAlert(message, type):
     from pyfcm import FCMNotification
@@ -284,27 +357,20 @@ def saveConfig():
     import os.path
 
     with open('{}/config.json'.format(os.path.dirname(os.path.realpath(__file__))), 'w') as f:
-        dump({'alertHumidityThreshold': alertHumidityThreshold, 'turnOnHumidityThreshold': turnOnHumidityThreshold, 'alertTemperatureThreshold': alertTemperatureThreshold, 'alertTemperatureAboveThreshold': alertTemperatureAboveThreshold, 'turnOnTemperatureThreshold': turnOnTemperatureThreshold, 'turnOffTemperatureThreshold': turnOffTemperatureThreshold}, f);
+        dump(config, f)
 
 def readConfig():
     from json import load
     import os.path
 
-    global alertHumidityThreshold
-    global turnOnHumidityThreshold
-    global alertTemperatureThreshold
-    global alertTemperatureAboveThreshold
-    global turnOnTemperatureThreshold
-    global turnOffTemperatureThreshold
+    global config
 
     with open('{}/config.json'.format(os.path.dirname(os.path.realpath(__file__))), 'r') as f:
-        jsonConfig = load(f)
-        alertHumidityThreshold = jsonConfig["alertHumidityThreshold"]
-        turnOnHumidityThreshold = jsonConfig["turnOnHumidityThreshold"]
-        alertTemperatureThreshold = jsonConfig["alertTemperatureThreshold"]
-        alertTemperatureAboveThreshold = jsonConfig["alertTemperatureAboveThreshold"]
-        turnOnTemperatureThreshold = jsonConfig["turnOnTemperatureThreshold"]
-        turnOffTemperatureThreshold = jsonConfig["turnOffTemperatureThreshold"]
+        config = load(f)
+
+def sha256(string):
+    import hashlib
+    return hashlib.sha256(string.encode('utf-8')).hexdigest()
 
 ## Main
 if __name__ == "__main__":
@@ -317,6 +383,7 @@ if __name__ == "__main__":
     global alertRunning
     global db
     global conn
+    global finishedInit
     global gpio
     global sensor
     global lastHumidity
@@ -336,10 +403,13 @@ if __name__ == "__main__":
 
     db = sqlite3.connect('{}/data.db'.format(os.path.dirname(os.path.realpath(__file__))), check_same_thread = False)
     conn = db.cursor()
+    conn.execute("CREATE TABLE IF NOT EXISTS users (username text, password text, admin int);")
     conn.execute("CREATE TABLE IF NOT EXISTS data (timestamp int, temperature int, humidity int);")
 
+    getUserFromDB('admin')
+
     alertRunning = False
-    gpio.set_mode(15, pigpio.OUTPUT)
+    finishedInit = True
     gpio.set_mode(10, pigpio.OUTPUT)
     gpio.set_mode(11, pigpio.OUTPUT)
     lastHumidity, lastTemperature = getDhtData()

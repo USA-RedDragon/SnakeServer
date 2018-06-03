@@ -1,1 +1,1 @@
-{"alertTemperatureThreshold": 85, "turnOffTemperatureThreshold": 92, "turnOnHumidityThreshold": 70, "alertHumidityThreshold": 30, "turnOnTemperatureThreshold": 89, "alertTemperatureAboveThreshold": 96}
+{"turnOffTemperatureThreshold": 92, "turnOnHumidityThreshold": 70, "alertHumidityThreshold": 30, "canAnonViewWebUI": true, "alertTemperatureThreshold": 85, "turnOnTemperatureThreshold": 89, "canAnonUsePublicAPI": false, "alertTemperatureAboveThreshold": 96}
