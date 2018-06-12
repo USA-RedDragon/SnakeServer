@@ -107,6 +107,11 @@ def addUserToDB(username, password, admin=False):
         conn.execute("INSERT INTO users (username, password, admin) VALUES (?, ?, ?)", (username, sha256(password), int(admin)))
         db.commit()
 
+def updateUser(username, password, admin=False):
+    with databaseLock:
+        conn.execute("UPDATE users SET password=?, admin=? WHERE username = ?", (sha256(password), int(admin), username))
+        db.commit()
+
 def getDataFromDB(since, useJson=True):
     with databaseLock:
         conn.execute("SELECT * FROM data WHERE timestamp > ?", (since,))
@@ -136,15 +141,15 @@ def getUserFromDB(username):
         conn.execute("SELECT * FROM users WHERE username = ?", (username,))
         dbData = conn.fetchall()
         if len(dbData) == 0:
-            return 'anonymous', '', False
+            return None, None, None
         return dbData[0][0], dbData[0][1], dbData[0][2]
-    return 'anonymous', '', False
+    return None, None, None
 
 def authUser(request):
     username = (request.authorization and request.authorization.username) or (request.headers.get('Username'))
     password = (request.authorization and sha256(request.authorization.password)) or (request.headers.get('Password'))
     expectedUsername, expectedPassword, isAdmin = getUserFromDB(username)
-    if expectedPassword == password:
+    if (request.authorization is not None or request.headers.get('Username') is not None) and expectedUsername is not None and expectedPassword.lower() == password.lower():
         return True;
     return False
 
@@ -152,7 +157,7 @@ def authHttpUserAsAdmin(auth):
     username = auth.username
     password = sha256(auth.password)
     expectedUsername, expectedPassword, isAdmin = getUserFromDB(username)
-    if expectedPassword == password:
+    if expectedPassword.lower() == password.lower():
         return True and isAdmin;
     return False
 
@@ -160,7 +165,7 @@ def authUserAsAdmin(headers):
     username = headers.get('Username')
     password = headers.get('Password')
     expectedUsername, expectedPassword, isAdmin = getUserFromDB(username)
-    if expectedPassword == password:
+    if expectedPassword.lower() == password.lower():
         return True and isAdmin;
     return False
 
@@ -259,23 +264,77 @@ def sendDatabase(since):
     else:
         return httpAuth()
 
-@app.route('/api/v1/adduser/<username>/<password>')
-def addUsr(username, password, admin=False):
+@app.route('/api/v1/adduser', methods=['GET', 'POST'])
+def addUsr():
     from flask import request
 
-    if request.headers.get("Headless") and authUserAsAdmin(request.headers) or (request.authorization and authHttpUserAsAdmin(request.authorization)):
-        usr, psw, ta = getUserFromDB(username)
-        if username == usr:
-            return "Username already exists"
+    if (request.headers.get("Headless") and authUserAsAdmin(request.headers)) or (request.authorization and authHttpUserAsAdmin(request.authorization)):
+        username = request.headers.get("NewUsername")
+        if username is not None:
+            password = request.headers.get("NewPassword")
+            adminStr = request.headers.get("IsAdmin")
+            admin = adminStr == "true"
+            usr, psw, ta = getUserFromDB(username)
+            if username == usr:
+                return "Username already exists"
+            else:
+                addUserToDB(username, password, admin)
+                return "Success"
+        elif request.form:
+            usr, psw, ta = getUserFromDB(username)
+            if username == usr:
+                return "Username already exists"
+            else:
+                admin = request.form.get("isAdmin") is not None
+                username = request.form.get("newUsername")
+                password = request.form.get("newPassword")
+                if username is None or password is None:
+                    return "Error Occured"
+                else:
+                    addUserToDB(username, password, admin)
+                    return "User {} added".format(username)
         else:
-            addUserToDB(username, password, admin)
-            return "Success"
+            from flask import render_template, url_for
+            return render_template('addUser.html', submit=url_for('addUsr'))
     else:
         return httpAuth()
 
-@app.route('/api/v1/adduser/<username>/<password>/<admin>')
-def addUsrAsAdmin(username, password, admin):
-    return addUsr(username, password, admin == 'admin')
+@app.route('/api/v1/updateuser', methods=['GET', 'POST'])
+def updateUsr():
+    from flask import request
+
+    if (request.headers.get("Headless") and authUserAsAdmin(request.headers)) or (request.authorization and authHttpUserAsAdmin(request.authorization)):
+        username = request.headers.get("NewUsername")
+        if username is not None:
+            password = request.headers.get("NewPassword")
+            adminStr = request.headers.get("IsAdmin")
+            admin = adminStr == "true"
+            usr, psw, ta = getUserFromDB(username)
+            if usr == None:
+                return "Username doesn't exist"
+            else:
+                updateUser(username, password, admin)
+                print getUserFromDB('admin')
+                return "Success"
+        elif request.form:
+            username = request.form.get("newUsername")
+            usr, psw, ta = getUserFromDB(username)
+            if usr == None:
+                return "Username doesn't exist"
+            else:
+                admin = request.form.get("isAdmin") is not None
+                password = request.form.get("newPassword")
+                if username is None or password is None:
+                    return "Error Occured"
+                else:
+                    updateUser(username, password, admin)
+                    print getUserFromDB('admin')
+                    return "User {} updated".format(username)
+        else:
+            from flask import render_template, url_for
+            return render_template('updateUser.html', submit=url_for('updateUsr'))
+    else:
+        return httpAuth()
 
 def updateScreen(humidity, temperature, alert):
     with screenLock:
@@ -405,8 +464,6 @@ if __name__ == "__main__":
     conn = db.cursor()
     conn.execute("CREATE TABLE IF NOT EXISTS users (username text, password text, admin int);")
     conn.execute("CREATE TABLE IF NOT EXISTS data (timestamp int, temperature int, humidity int);")
-
-    getUserFromDB('admin')
 
     alertRunning = False
     finishedInit = True
