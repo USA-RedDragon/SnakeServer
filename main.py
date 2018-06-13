@@ -401,7 +401,7 @@ def sendAlert(message, type):
     global lastHumidityTime
     global lastTemperatureTime
 
-    push_service = FCMNotification(api_key="DUMMY")
+    push_service = FCMNotification(api_key=process.env.FCM_KEY)
     if type is "humidity" and lastHumidityTime + 300000 < int(round(time.time() * 1000)):
         print("Sending humidity Alert")
         lastHumidityTime = int(round(time.time() * 1000))

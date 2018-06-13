@@ -4,6 +4,7 @@ Description=autosnake
 [Service]
 Type=simple
 User=root
+Environment=FCM_KEY=DUMMY
 ExecStart=/usr/bin/python /home/pi/snake/main.py
 Restart=always
 RestartSec=3
