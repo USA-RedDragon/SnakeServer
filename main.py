@@ -393,15 +393,16 @@ def flaskThread():
     with screenLock:
         lcd.clear()
         lcd.message("Server Loaded")
-    app.run(port=80, host='0.0.0.0')
+    app.run(port=80, host='0.0.0.0', threaded=True)
 
 def sendAlert(message, type):
     from pyfcm import FCMNotification
+    import os
 
     global lastHumidityTime
     global lastTemperatureTime
 
-    push_service = FCMNotification(api_key=process.env.FCM_KEY)
+    push_service = FCMNotification(api_key=os.environ['FCM_KEY'])
     if type is "humidity" and lastHumidityTime + 300000 < int(round(time.time() * 1000)):
         print("Sending humidity Alert")
         lastHumidityTime = int(round(time.time() * 1000))
